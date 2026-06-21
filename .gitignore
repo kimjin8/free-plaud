@@ -1,0 +1,26 @@
+# --- secrets (never commit) ---
+.plaud_env
+*.env
+!.env.example
+
+# --- private audio + generated outputs (keep meeting content off GitHub) ---
+audio/
+processed/
+*.ogg
+*.mp3
+*.m4a
+*.wav
+*.opus
+*.aac
+*.flac
+untranscribed_manifest.csv
+
+# --- internal design docs (local only, not for the repo) ---
+cloud-pipeline-DESIGN.md
+CLAUDE_CODE_HANDOFF.md
+
+# --- logs / caches ---
+*.log
+__pycache__/
+*.pyc
+.DS_Store
