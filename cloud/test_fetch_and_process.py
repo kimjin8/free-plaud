@@ -187,6 +187,9 @@ class AuthAlertTests(TestHelper):
         self.patch("plaud_version", lambda: "test")
         # Skip intake for this test.
         self.patch("rclone_intake_files", lambda: [])
+        # Capture GitHub-issue notifications instead of hitting the network.
+        self.notified = []
+        self.patch("notify_github_issue", lambda t, b: self.notified.append(t))
         argv = sys.argv
         sys.argv = ["fetch_and_process.py", "--source", "plaud"]
         self.addCleanup(lambda: setattr(sys, "argv", argv))
@@ -203,6 +206,38 @@ class AuthAlertTests(TestHelper):
         self.assertEqual(rc, 2)
         self.assertIn("[ALERT][PLAUD_AUTH_FAILED]", errbuf.getvalue())
         self.assertIn("processed=0", out.getvalue())
+        # A GitHub issue is filed on auth failure.
+        self.assertEqual(self.notified,
+                         ["[plaud-pipeline] Plaud login expired — re-auth needed"])
+
+
+class GitHubNotifyTests(TestHelper):
+    def test_noop_when_unconfigured(self):
+        # No GITHUB_TOKEN/REPO in the test env -> must not touch the network.
+        self.patch("GITHUB_TOKEN", "")
+        self.patch("GITHUB_REPO", "")
+        def explode(*a, **k):
+            raise AssertionError("network called despite missing GitHub config")
+        self.patch("requests", type("R", (), {"get": staticmethod(explode),
+                                               "post": staticmethod(explode)}))
+        with redirect_stderr(io.StringIO()):
+            fp.notify_github_issue("t", "b")  # should simply return
+
+    def test_dedupes_open_issue(self):
+        self.patch("GITHUB_TOKEN", "tok")
+        self.patch("GITHUB_REPO", "owner/repo")
+        posted = []
+        class Resp:
+            ok = True
+            def __init__(self, data): self._d = data
+            def json(self): return self._d
+        def fake_get(url, **k): return Resp([{"title": "dup-title"}])
+        def fake_post(url, **k): posted.append(k.get("json", {}).get("title")); return Resp({"number": 1})
+        self.patch("requests", type("R", (), {"get": staticmethod(fake_get),
+                                               "post": staticmethod(fake_post)}))
+        with redirect_stderr(io.StringIO()):
+            fp.notify_github_issue("dup-title", "body")  # open issue exists -> skip POST
+        self.assertEqual(posted, [])  # deduped, no new issue
 
 
 if __name__ == "__main__":

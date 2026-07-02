@@ -37,6 +37,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -72,10 +73,13 @@ PROCESSED_IDS_FILE = STATE_DIR / "processed_ids.txt"
 # Intake audio extensions (per handoff). Mirrors the engine's set closely.
 AUDIO_EXTS = {".m4a", ".mp3", ".wav", ".ogg", ".flac", ".aac", ".mp4", ".opus"}
 
-# Optional host-agnostic alert hook (e.g. "msmtp you@example.com"). On GCP the
-# primary alerting path is a Cloud Logging log-based alert on the [ALERT] line, so
-# this is usually left unset. See cloud/SETUP.md.
+# Optional host-agnostic alert hook (e.g. "msmtp you@example.com").
 ALERT_CMD = os.environ.get("ALERT_CMD", "").strip()
+
+# Failure notification: open a GitHub issue when a run fails. Both must be set
+# (from Doppler) for notifications to fire; otherwise it's a no-op.
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
+GITHUB_REPO = os.environ.get("GITHUB_REPO", "").strip()  # "owner/repo"
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 # A plausible Plaud recording id: a single no-whitespace token of id-ish chars.
@@ -117,6 +121,31 @@ def emit_auth_alert() -> None:
             subprocess.run(ALERT_CMD, shell=True, input=line, text=True, timeout=30, check=False)
         except Exception as e:  # alerting must never crash the run
             err(f"[warn] ALERT_CMD failed: {e}")
+
+
+def notify_github_issue(title: str, body: str) -> None:
+    """Open a GitHub issue to report a failed run. No-op unless GITHUB_TOKEN and
+    GITHUB_REPO are set. Deduped: if an open issue with the same title already
+    exists, skip it — so a persistent failure doesn't file a new issue every night.
+    Never raises; notification must not crash the run."""
+    if not (GITHUB_TOKEN and GITHUB_REPO):
+        return
+    api = f"https://api.github.com/repos/{GITHUB_REPO}/issues"
+    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}",
+               "Accept": "application/vnd.github+json",
+               "X-GitHub-Api-Version": "2022-11-28"}
+    try:
+        existing = requests.get(api, headers=headers, params={"state": "open"}, timeout=30)
+        if existing.ok and any(i.get("title") == title for i in existing.json()):
+            err(f"[notify] open issue already exists ({title!r}); not duplicating")
+            return
+        r = requests.post(api, headers=headers, json={"title": title, "body": body}, timeout=30)
+        if r.ok:
+            err(f"[notify] opened GitHub issue #{r.json().get('number')}")
+        else:
+            err(f"[notify] GitHub issue create failed ({r.status_code}): {r.text[:200]}")
+    except Exception as e:
+        err(f"[notify] GitHub notify error: {e}")
 
 
 # ------------------------------------------------------------- plaud CLI adapter
@@ -421,7 +450,24 @@ def main() -> int:
 
     total_ok = intake_ok + plaud_ok
     total_err = intake_err + plaud_err
-    log(f"processed={total_ok} intake={intake_ok} plaud={plaud_ok} errors={total_err}")
+    summary = f"processed={total_ok} intake={intake_ok} plaud={plaud_ok} errors={total_err}"
+    log(summary)
+
+    # Notify on failure (GitHub issue). Dry-runs never notify.
+    if not args.dry_run and (auth_failed or total_err):
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        if auth_failed:
+            notify_github_issue(
+                "[plaud-pipeline] Plaud login expired — re-auth needed",
+                "The nightly run could not authenticate to Plaud (AUTH_FAILED).\n\n"
+                "**Fix:** re-run `plaud login` (or re-seed `tokens.json`) on teslamate-vm.\n\n"
+                f"- {summary}\n- {ts}")
+        else:
+            notify_github_issue(
+                "[plaud-pipeline] Nightly run reported errors",
+                f"The nightly run finished with {total_err} error(s).\n\n"
+                "**Check:** `journalctl -u plaud-pipeline.service --since today` on teslamate-vm.\n\n"
+                f"- {summary}\n- {ts}")
 
     if auth_failed:
         return PLAUD_EXIT_AUTH_FAILED  # exit non-zero so the alert policy fires
