@@ -99,6 +99,18 @@ class ParsingTests(TestHelper):
         self.patch("_run_plaud", lambda args: AUDIO_UNAVAILABLE)
         self.assertIsNone(fp.plaud_audio_url("rec_x"))
 
+    def test_recording_time_prefers_start_at(self):
+        out = ("\nFile Details:\n\n  id:           abc\n  name:         A Meeting\n"
+               "  created_at:   2026-07-01T20:34:35\n"
+               "  start_at:     2026-07-01T20:00:23.563000\n  duration:     33m10s\n")
+        self.patch("_run_plaud", lambda args: out)
+        self.assertEqual(fp.plaud_recording_time("abc"), "2026-07-01 20_00_23")
+
+    def test_recording_time_falls_back_to_created_at(self):
+        out = ("  created_at:   2026-07-01T20:34:35\n  start_at:     -\n")
+        self.patch("_run_plaud", lambda args: out)
+        self.assertEqual(fp.plaud_recording_time("abc"), "2026-07-01 20_34_35")
+
     def test_intake_filters_to_audio_only(self):
         listing = "Standup.m4a\nNotes.txt\ncall.mp3\nimage.png\narchive.zip\nvoice.opus\n"
         self.patch("_run_rclone", lambda args: listing)

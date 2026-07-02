@@ -217,6 +217,32 @@ def plaud_audio_url(file_id: str) -> str | None:
     return None  # "Audio not available for this recording."
 
 
+def plaud_recording_time(file_id: str) -> str | None:
+    """Return the recording's start time as a filesystem-safe 'YYYY-MM-DD HH_MM_SS'
+    string (from `plaud file`), so output filenames carry the meeting date/time.
+    Prefers start_at (actual recording start) over created_at. Returns None if
+    unavailable — the caller falls back to the id."""
+    try:
+        out = _run_plaud(["file", file_id])
+    except PlaudAuthError:
+        raise
+    except Exception:
+        return None
+    fields = {}
+    for raw in out.splitlines():
+        m = re.match(r"(start_at|created_at):\s*(.+)$", strip_ansi(raw).strip())
+        if m:
+            fields[m.group(1)] = m.group(2).strip()
+    for key in ("start_at", "created_at"):
+        val = fields.get(key)
+        if val and val != "-":
+            try:
+                return datetime.fromisoformat(val).strftime("%Y-%m-%d %H_%M_%S")
+            except ValueError:
+                continue
+    return None
+
+
 # -------------------------------------------------------------- rclone adapter
 # Google Drive I/O via rclone, authenticated as the user (OAuth token in rclone's
 # config). Files are owned by the user, so writes to a personal-Gmail Drive work
@@ -335,7 +361,9 @@ def process_plaud(processed: set[str], aai_key: str, gem_key: str, model: str,
                 work = Path(td)
                 audio_path = work / f"{file_id}.audio"
                 _download(url, audio_path)
-                base = f"plaud_{_sanitize_base(file_id)}"
+                # Name outputs by the recording's date/time so notes are
+                # distinguishable; fall back to the id if unavailable.
+                base = plaud_recording_time(file_id) or f"plaud_{_sanitize_base(file_id)}"
                 outputs = transcribe_and_note(audio_path, base, work,
                                               aai_key, gem_key, model)
                 for f in outputs:
