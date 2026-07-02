@@ -81,6 +81,10 @@ ALERT_CMD = os.environ.get("ALERT_CMD", "").strip()
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "").strip()  # "owner/repo"
 
+# Dead-man's-switch: a healthchecks.io ping URL. Pinged on success (and /fail on
+# failure); the *absence* of a ping (job never ran at all) makes the service alert.
+HEALTHCHECK_URL = os.environ.get("HEALTHCHECK_URL", "").strip()
+
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 # A plausible Plaud recording id: a single no-whitespace token of id-ish chars.
 PLAUD_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{7,}$")
@@ -146,6 +150,18 @@ def notify_github_issue(title: str, body: str) -> None:
             err(f"[notify] GitHub issue create failed ({r.status_code}): {r.text[:200]}")
     except Exception as e:
         err(f"[notify] GitHub notify error: {e}")
+
+
+def ping_healthcheck(suffix: str = "") -> None:
+    """Ping the healthchecks.io dead-man's-switch (no-op if HEALTHCHECK_URL unset).
+    A success ping resets the timer; the service alerts if it doesn't arrive within
+    the schedule + grace (i.e. the job never ran). Never raises."""
+    if not HEALTHCHECK_URL:
+        return
+    try:
+        requests.get(HEALTHCHECK_URL.rstrip("/") + suffix, timeout=15)
+    except Exception as e:
+        err(f"[healthcheck] ping failed: {e}")
 
 
 # ------------------------------------------------------------- plaud CLI adapter
@@ -496,6 +512,11 @@ def main() -> int:
                 f"The nightly run finished with {total_err} error(s).\n\n"
                 "**Check:** `journalctl -u plaud-pipeline.service --since today` on teslamate-vm.\n\n"
                 f"- {summary}\n- {ts}")
+
+    # Dead-man's-switch: success ping resets the timer; /fail alerts immediately;
+    # a total no-run (nothing pinged) is caught by the service's absence alert.
+    if not args.dry_run:
+        ping_healthcheck("" if not (auth_failed or total_err) else "/fail")
 
     if auth_failed:
         return PLAUD_EXIT_AUTH_FAILED  # exit non-zero so the alert policy fires

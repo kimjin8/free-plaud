@@ -111,14 +111,24 @@ The timer fires `OnCalendar=*-*-* 03:00:00` in the VM's timezone (UTC by default
 
 ---
 
-## Email alert for Plaud re-login (GCP-native, no secrets on the VM)
+## Failure alerting (two layers)
 
-On Plaud token expiry the pipeline logs `[ALERT][PLAUD_AUTH_FAILED]` and exits non-zero.
-Wire a Cloud Logging log-based alert to email you:
+**1. GitHub issue on failure.** On an errored run or Plaud auth failure, the pipeline
+opens a deduped issue in `GITHUB_REPO` using `GITHUB_TOKEN` (fine-grained PAT scoped to
+`free-plaud`, Issues read/write). Set both in Doppler `prd`.
 
-1. Ensure the Ops Agent ships journald to Cloud Logging (TeslaMate may already have it).
-2. `gcloud beta monitoring channels create --type=email --channel-labels=email_address=YOUR_EMAIL_HERE --display-name="Plaud alerts" --project=gen-lang-client-0680367969`
-3. Monitoring → Alerting → Create policy → Log match: `textPayload:"[ALERT][PLAUD_AUTH_FAILED]"`; attach the channel. On alert, re-run `plaud login` (or re-seed `tokens.json`).
+**2. Dead-man's-switch (healthchecks.io)** — catches the case layer 1 can't: the job
+*never running at all* (VM down, Docker/timer broken). The pipeline pings
+`HEALTHCHECK_URL` on success (`…/fail` on failure); healthchecks.io emails you if a ping
+is ever missing.
+- Create a check (Simple schedule, period 1 day, grace ~4 hours) with an email
+  integration; copy its ping URL into Doppler `prd` as `HEALTHCHECK_URL`.
+- On a Plaud auth failure you'll get the GitHub issue "Plaud login expired" — re-run
+  `plaud login` (or re-seed `tokens.json`).
+
+> Also: `PLAUD_LOOKBACK_DAYS=7` in prd means an outage up to a week self-heals on
+> recovery (idempotency skips already-processed recordings), so a short miss loses
+> nothing even before you react to an alert.
 
 ## Day-2 operations
 

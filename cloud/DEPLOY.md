@@ -33,17 +33,30 @@ scratch. Safe to commit.
 |---|---|---|---|
 | `ASSEMBLYAI_API_KEY` | dev, prd | ✅ secret | AssemblyAI key |
 | `GEMINI_API_KEY` | dev, prd | ✅ secret | Google AI Studio (Gemini) key |
+| `GITHUB_TOKEN` | prd | ✅ secret | Fine-grained PAT (`free-plaud` only, Issues R/W) for failure issues |
+| `HEALTHCHECK_URL` | prd | ✅ secret | healthchecks.io ping URL (dead-man's-switch) |
 | `GEMINI_MODEL` | dev, prd | no | `gemini-3.5-flash` (the only supported model) |
+| `GITHUB_REPO` | prd | no | `owner/repo` for failure issues (e.g. `kimjin8/free-plaud`) |
 | `RCLONE_REMOTE` | prd | no | rclone remote name, default `gdrive` |
 | `INTAKE_FOLDER_ID` | prd | no | Drive intake folder (has a code default) |
 | `DEST_FOLDER_ID` | prd | no | Drive destination folder (has a code default) |
-| `PLAUD_LOOKBACK_DAYS` | prd | no | default `2` |
+| `PLAUD_LOOKBACK_DAYS` | prd | no | default `2`; set to `7` in prd so multi-day outages self-heal |
 | `ARCHIVE_PLAUD_AUDIO` | prd | no | `true`/`false`, default `false` |
 | `STATE_DIR` | prd | no | container uses `/state` (host volume); default `~/.plaud_pipeline` |
 
-Only `*_API_KEY` are Doppler secrets. The Drive (rclone) and Plaud tokens are host-volume
-files on the VM, not Doppler secrets. The rest are non-sensitive tunables with safe
-code defaults; set them in Doppler only to override.
+Doppler secrets: the two `*_API_KEY`, `GITHUB_TOKEN`, and `HEALTHCHECK_URL`. The Drive
+(rclone) and Plaud tokens are host-volume files on the VM, not Doppler secrets. The rest
+are non-sensitive tunables with safe code defaults; set them in Doppler only to override.
+
+## Failure alerting (two layers)
+
+1. **GitHub issue on failure** — on an errored run (`errors>0`) or Plaud auth failure,
+   the pipeline opens a deduped issue in `GITHUB_REPO` via `GITHUB_TOKEN`. Catches
+   failures *while the job runs*.
+2. **Dead-man's-switch (healthchecks.io)** — the pipeline pings `HEALTHCHECK_URL` on
+   success (and `…/fail` on failure). If the ping never arrives (job never ran at all —
+   VM down, Docker/timer broken), healthchecks.io emails you. This is what layer 1
+   can't catch. Check: 1-day period, 4-hour grace, email integration.
 
 ## Rebuild prod from scratch (names only — safe to commit)
 

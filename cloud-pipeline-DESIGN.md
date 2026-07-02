@@ -86,13 +86,19 @@ is GCP‑specific except "it happens to run on a GCP VM."
 - **AssemblyAI / Gemini keys:** stored in Doppler, injected via `doppler run` inside
   the container (`DOPPLER_TOKEN` service token on the VM).
 - **Token expiry:** when Plaud's refresh token eventually expires (CLI exits with code `2`,
-  `AUTH_FAILED`), the job **emails the owner** "re‑run `plaud login`" and exits non‑zero.
-  This is the only recurring manual touch.
+  `AUTH_FAILED`), the job opens a GitHub issue "Plaud login expired" and exits non‑zero.
+  Re‑running `plaud login` (or re‑seeding `tokens.json`) is the only recurring manual touch.
 
-## 7. Logging & observability
-- All run output (per‑file status, totals, errors) goes to **stdout/stderr**, captured by
-  the systemd service → `journald` → **GCP Cloud Logging**. **Not** written to the Destination Drive folder.
-- A one‑line run summary per night ("processed N, errors M") is logged at the end.
+## 7. Logging, observability & alerting
+- All run output (per‑file status, totals, errors) goes to **stdout/stderr** → the systemd
+  service → `journald`. A one‑line summary (`processed=N … errors=M`) ends each run.
+- **Two-layer failure alerting:**
+  1. **GitHub issue** — on `errors>0` or Plaud auth failure, a deduped issue is opened in
+     `GITHUB_REPO` (via a fine-grained `GITHUB_TOKEN`). Catches failures *during* a run.
+  2. **Dead-man's-switch** — the job pings a healthchecks.io URL on success; the service
+     emails the owner if a ping never arrives (the job **never ran at all** — VM/Docker/
+     timer down), which layer 1 structurally cannot detect. `PLAUD_LOOKBACK_DAYS=7`
+     means a short outage self-heals without data loss.
 
 ## 8. Security
 - No inbound services added on the VM. SSH via Google **OS Login / IAP** only.
@@ -128,7 +134,8 @@ See `cloud/SETUP.md` for the full runbook. In brief:
 ## 12. Failure modes
 | Failure | Behavior |
 | --- | --- |
-| Plaud token expired | CLI exit 2 → email owner, exit non‑zero, retry next night after re‑login. |
+| Plaud token expired | CLI exit 2 → GitHub issue "Plaud login expired", exit non‑zero, retry next night after re‑login. |
+| Job never runs (VM/Docker/timer down) | No healthchecks.io ping → the service emails the owner; a run missed during downtime catches up (`Persistent=true`), and the 7‑day lookback recovers Plaud recordings. |
 | One recording errors | Logged; not marked processed; retried next run; others continue. |
 | AssemblyAI/Gemini transient error | Per‑file try/except; retried next run. |
 | Drive write fails | File not marked processed (intake not moved); retried next run. |

@@ -252,5 +252,23 @@ class GitHubNotifyTests(TestHelper):
         self.assertEqual(posted, [])  # deduped, no new issue
 
 
+class HealthcheckTests(TestHelper):
+    def test_noop_when_unset(self):
+        self.patch("HEALTHCHECK_URL", "")
+        def explode(*a, **k):
+            raise AssertionError("pinged despite no HEALTHCHECK_URL")
+        self.patch("requests", type("R", (), {"get": staticmethod(explode)}))
+        with redirect_stderr(io.StringIO()):
+            fp.ping_healthcheck()  # should simply return
+
+    def test_pings_url_with_suffix(self):
+        self.patch("HEALTHCHECK_URL", "https://hc-ping.com/abc/")  # trailing slash trimmed
+        got = []
+        self.patch("requests", type("R", (), {"get": staticmethod(lambda url, **k: got.append(url))}))
+        fp.ping_healthcheck()
+        fp.ping_healthcheck("/fail")
+        self.assertEqual(got, ["https://hc-ping.com/abc", "https://hc-ping.com/abc/fail"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
