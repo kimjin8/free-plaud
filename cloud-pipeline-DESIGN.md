@@ -27,7 +27,7 @@ and rclone's on‑disk tokens a non‑issue** — they auto‑refresh on disk (h
 exactly as on a laptop, with no token write‑back code.
 
 ```
-Sources                     Engine (e2-micro VM, nightly cron)            Outputs
+Sources                     Engine (e2-micro VM, nightly systemd timer)   Outputs
 -------                     -----------------------------------           -------
 Plaud Cloud  ──► Plaud CLI ─┐
                             ├─► AssemblyAI ─► Gemini 3.5 Flash ─► Drive: Destination (transcripts + notes)
@@ -47,7 +47,7 @@ is GCP‑specific except "it happens to run on a GCP VM."
 | **rclone** (user OAuth) | Drive I/O: list the intake folder, download items, write the destination folder, move processed audio into `processed/`. Authenticated as the account owner (token in `rclone.conf` on a host volume, auto-refreshed). Files are user-owned, so writes to personal-Gmail Drive work — a service account can't (no storage quota). |
 | **`plaud_pipeline.py`** (reused verbatim) | The validated transcribe (AssemblyAI) + notes (Gemini) core. Same behavior as the local runs already accepted. |
 | **`fetch_and_process`** (new wrapper) | Orchestrates: pull Plaud → scan intake → run pipeline → write/move/log. |
-| **cron** | Nightly trigger. |
+| **systemd timer** | Nightly trigger on the COS VM (portable hosts can use cron instead). |
 
 ## 4. Data flow
 
@@ -91,7 +91,7 @@ is GCP‑specific except "it happens to run on a GCP VM."
 
 ## 7. Logging & observability
 - All run output (per‑file status, totals, errors) goes to **stdout/stderr**, captured by
-  cron → `journald` → **GCP Cloud Logging**. **Not** written to the Destination Drive folder.
+  the systemd service → `journald` → **GCP Cloud Logging**. **Not** written to the Destination Drive folder.
 - A one‑line run summary per night ("processed N, errors M") is logged at the end.
 
 ## 8. Security

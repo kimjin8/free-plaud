@@ -1,4 +1,10 @@
-# Plaud cloud pipeline — nightly run.
+# Plaud cloud pipeline — nightly run (PORTABLE hosts only).
+#
+# NOTE: the GCP deployment on teslamate-vm runs Container-Optimized OS (no cron) and
+# is scheduled by a systemd timer instead — see cloud/systemd/ and cloud/SETUP.md.
+# This crontab line is for a portable non-container host (Pi/VPS) that runs run.sh
+# directly with cron.
+#
 # Install with `crontab -e` and adjust the path to where you cloned the repo.
 #
 # Runs at 03:00 every day (host local time — set the VM timezone, or use UTC and

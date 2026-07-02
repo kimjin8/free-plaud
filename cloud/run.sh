@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
-# Cron entrypoint for the Plaud cloud pipeline.
+# Entrypoint for a PORTABLE / local host (Pi/VPS, or `doppler run` locally).
+# The GCP deployment uses the container image + systemd timer instead (see
+# cloud/Dockerfile, cloud/systemd/, cloud/SETUP.md) — this script is for hosts where
+# you run the orchestrator directly with the Doppler CLI installed.
+#
 # Secrets + config are injected by Doppler (project: free-plaud), then the
 # orchestrator runs. All output goes to stdout/stderr -> journald -> Cloud Logging;
 # nothing is logged to Drive.
-#
-# Install (see cloud/SETUP.md):
-#   chmod +x cloud/run.sh
-#   doppler setup -p free-plaud -c prd      # one-time, in the repo dir
-#   crontab -e                              # add the line from cloud/crontab.example
 set -euo pipefail
 
 # Resolve paths from this script's location so cron's CWD doesn't matter.

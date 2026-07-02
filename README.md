@@ -60,7 +60,7 @@ Already-processed files are skipped, so the batch is safe to re-run.
 
 To run this unattended (no Mac required) — auto-fetching new Plaud recordings via
 the Plaud CLI and ingesting audio dropped into a Google Drive intake folder, then
-writing transcripts + notes to a Drive destination folder on a nightly cron — see:
+writing transcripts + notes to a Drive destination folder on a nightly schedule — see:
 
 - [`cloud-pipeline-DESIGN.md`](cloud-pipeline-DESIGN.md) — architecture and rationale.
 - [`cloud/SETUP.md`](cloud/SETUP.md) — copy-paste runbook (GCP free-tier `e2-micro`,
