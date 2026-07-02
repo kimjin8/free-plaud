@@ -1,0 +1,11 @@
+# Plaud cloud pipeline — nightly run.
+# Install with `crontab -e` and adjust the path to where you cloned the repo.
+#
+# Runs at 03:00 every day (host local time — set the VM timezone, or use UTC and
+# pick an off-peak hour). cron captures stdout/stderr; on a GCP VM the Ops Agent
+# ships those to Cloud Logging, where a log-based alert watches for
+# "[ALERT][PLAUD_AUTH_FAILED]" (see cloud/SETUP.md).
+#
+# The trailing logger line tags output so it is easy to find in journald.
+
+0 3 * * * /path/to/free-plaud/cloud/run.sh 2>&1 | /usr/bin/logger -t plaud-pipeline

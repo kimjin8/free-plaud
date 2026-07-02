@@ -1,0 +1,16 @@
+# Plaud pipeline — nightly transcribe+notes run (container on COS host).
+# Install to /etc/systemd/system/ on teslamate-vm. Triggered by plaud-pipeline.timer.
+[Unit]
+Description=Plaud transcribe+notes pipeline (one nightly run)
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+# DOPPLER_TOKEN (prd service token) lives here, chmod 600.
+EnvironmentFile=/etc/plaud-pipeline.env
+# The stateful partition is mounted noexec on COS, so run the script via bash
+# (bash reads it as data — no exec bit needed).
+ExecStart=/bin/bash /mnt/stateful_partition/plaud-pipeline/host-run.sh
+# Surface the one-line summary + any [ALERT] line in the journal (-> Cloud Logging).
+SyslogIdentifier=plaud-pipeline

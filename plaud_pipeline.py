@@ -16,7 +16,7 @@ Output (written to --out-dir, default: <audio-dir>/processed):
 API keys are read from environment variables:
     ASSEMBLYAI_API_KEY   (required)
     GEMINI_API_KEY       (required)
-    GEMINI_MODEL         (optional, default: gemini-3.1-pro-preview)
+    GEMINI_MODEL         (optional, default: gemini-3.5-flash)
 """
 
 import argparse
@@ -170,7 +170,7 @@ def resolve_model(requested: str, api_key: str) -> str:
              if "generateContent" in m.get("supportedGenerationMethods", [])]
     if requested in names:
         return requested
-    prefs = ["gemini-3.1-pro-preview", "gemini-3-pro-preview", "gemini-3-pro",
+    prefs = ["gemini-3.5-flash", "gemini-3-pro-preview", "gemini-3-pro",
              "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"]
     for p in prefs:
         if p in names:
@@ -251,7 +251,7 @@ def main():
 
     aai_key = os.environ.get("ASSEMBLYAI_API_KEY")
     gem_key = os.environ.get("GEMINI_API_KEY")
-    model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+    model = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
     if not aai_key or not gem_key:
         sys.exit("ERROR: set ASSEMBLYAI_API_KEY and GEMINI_API_KEY environment variables.")
 

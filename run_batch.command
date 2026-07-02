@@ -3,20 +3,18 @@
 # Plaud-style notes into ./processed. Already-processed files are skipped, so
 # re-running is safe. Double-click this file in Finder to run it.
 #
-# Setup (once): copy .env.example to .plaud_env and fill in your API keys.
+# Setup (once): secrets live in Doppler (project: free-plaud, config: dev).
+#   brew install dopplerhq/cli/doppler && doppler login
+#   doppler setup -p free-plaud -c dev        # run once in this folder
 # Usage: drop audio files into the ./audio folder, then double-click this file.
 
 cd "$(dirname "$0")"
 
-# Load API keys from the git-ignored .plaud_env file.
-if [ -f ./.plaud_env ]; then
-  set -a; source ./.plaud_env; set +a
-else
-  echo "ERROR: .plaud_env not found. Copy .env.example to .plaud_env and add your keys."
+if ! command -v doppler >/dev/null 2>&1; then
+  echo "ERROR: doppler CLI not found. Install it and run 'doppler login' (see cloud/DEPLOY.md)."
   read -p "Press Return to close."
   exit 1
 fi
-: "${GEMINI_MODEL:=gemini-3.1-pro-preview}"; export GEMINI_MODEL
 
 LOG="./plaud_batch.log"
 exec > >(tee "$LOG") 2>&1
@@ -28,8 +26,9 @@ python3 -m pip install --user --quiet requests 2>/dev/null \
   || python3 -m pip install --break-system-packages --quiet requests 2>/dev/null \
   || echo "(could not auto-install requests; continuing anyway)"
 
-echo "Processing all audio in ./audio ..."
-python3 ./plaud_pipeline.py --audio-dir ./audio --out-dir ./processed
+echo "Processing all audio in ./audio (secrets via Doppler) ..."
+doppler run -p free-plaud -c dev -- \
+  python3 ./plaud_pipeline.py --audio-dir ./audio --out-dir ./processed
 
 echo ""
 echo "============================================"

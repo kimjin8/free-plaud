@@ -1,7 +1,9 @@
 # --- secrets (never commit) ---
+# Secrets are managed in Doppler (project: free-plaud), not in env files. These
+# patterns stay as defense-in-depth in case a local .env is ever created.
 .plaud_env
 *.env
-!.env.example
+.doppler.yaml
 
 # --- private audio + generated outputs (keep meeting content off GitHub) ---
 audio/
@@ -15,8 +17,7 @@ processed/
 *.flac
 untranscribed_manifest.csv
 
-# --- internal design docs (local only, not for the repo) ---
-cloud-pipeline-DESIGN.md
+# --- internal handoff prompt (transient, local only) ---
 CLAUDE_CODE_HANDOFF.md
 
 # --- logs / caches ---
