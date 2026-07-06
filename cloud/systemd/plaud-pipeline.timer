@@ -4,9 +4,9 @@
 Description=Nightly trigger for the Plaud pipeline
 
 [Timer]
-# 03:00 America/Los_Angeles (DST-safe; needs systemd >= 252). Persistent catches
+# 23:00 America/Los_Angeles (DST-safe; needs systemd >= 252). Persistent catches
 # up a missed run after downtime.
-OnCalendar=*-*-* 03:00:00 America/Los_Angeles
+OnCalendar=*-*-* 23:00:00 America/Los_Angeles
 Persistent=true
 
 [Install]
