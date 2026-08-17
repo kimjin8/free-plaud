@@ -88,6 +88,11 @@ HEALTHCHECK_URL = os.environ.get("HEALTHCHECK_URL", "").strip()
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 # A plausible Plaud recording id: a single no-whitespace token of id-ish chars.
 PLAUD_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{7,}$")
+# What a genuinely empty `plaud recent` listing looks like. Anything else that
+# parses to zero recordings is treated as a broken parser, not a quiet night.
+# Deliberately biased toward false alarms: if the CLI rewords this, the job fails
+# loudly and we fix the pattern, which beats silently transcribing nothing.
+PLAUD_EMPTY_LISTING_RE = re.compile(r"\bno\s+recordings?\b", re.IGNORECASE)
 
 # The plaud CLI's own exit codes (from its ExitCode enum, verified against v0.3.2).
 PLAUD_EXIT_OK = 0
@@ -95,9 +100,26 @@ PLAUD_EXIT_AUTH_FAILED = 2
 PLAUD_EXIT_UNREACHABLE = 3
 PLAUD_EXIT_TIMEOUT = 4
 
+# Belt-and-braces auth detection. Exit code 2 is the documented signal, but it is
+# only "verified against v0.3.2". A CLI update, or an auth failure surfacing as a
+# generic error, silently downgrades an expired login into a nameless RuntimeError.
+# That mislabels the run as "reported errors" instead of firing the re-auth alert,
+# which is how a dead login sits unnoticed for weeks. So match the message too.
+PLAUD_AUTH_TEXT_RE = re.compile(
+    r"(unauthori[sz]ed|unauthenticated|forbidden|\b401\b|\b403\b"
+    r"|token\s+(is\s+)?(expired|invalid)|expired\s+token|invalid\s+token"
+    r"|not\s+logged\s?in|please\s+log\s?in|re-?authenticate|auth(entication)?\s+failed)",
+    re.IGNORECASE,
+)
+
+# Error details collected during the run, so the failure notification can say what
+# actually broke instead of only pointing at journalctl.
+RUN_ERRORS: list[str] = []
+
 
 class PlaudAuthError(Exception):
-    """Raised when the Plaud CLI reports AUTH_FAILED (exit 2)."""
+    """Raised when the Plaud CLI reports AUTH_FAILED (exit 2, or an auth-shaped
+    message on any other non-zero exit)."""
 
 
 # ------------------------------------------------------------------- small utils
@@ -108,6 +130,13 @@ def log(msg: str) -> None:
 
 def err(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
+
+
+def record_error(msg: str) -> None:
+    """Log to stderr and keep the text, so the failure notification can quote it."""
+    err(msg)
+    if len(RUN_ERRORS) < 10:  # bound the issue body
+        RUN_ERRORS.append(msg)
 
 
 def strip_ansi(s: str) -> str:
@@ -180,6 +209,12 @@ def _run_plaud(args: list[str]) -> str:
         raise PlaudAuthError(strip_ansi(proc.stderr).strip() or "AUTH_FAILED")
     if proc.returncode != PLAUD_EXIT_OK:
         detail = strip_ansi(proc.stderr or proc.stdout).strip()
+        # Any non-zero exit whose message looks like an auth problem is an auth
+        # problem, whatever code the CLI chose. Without this, an expired login
+        # raises a generic RuntimeError and the run files the vague
+        # "reported errors" issue instead of the actionable re-auth one.
+        if PLAUD_AUTH_TEXT_RE.search(detail):
+            raise PlaudAuthError(detail or "AUTH_FAILED")
         raise RuntimeError(f"plaud {' '.join(args)} exited {proc.returncode}: {detail}")
     return proc.stdout
 
@@ -196,7 +231,13 @@ def plaud_recent_ids(days: int) -> list[str]:
 
     Parses the `recent` table: each data row is `  <id>  <name>  <date>  <dur>`
     with the id as the first whitespace token. Header/summary/empty lines are
-    skipped, so a format tweak degrades to "found nothing" rather than garbage."""
+    skipped.
+
+    Raises RuntimeError if the output parses to nothing but does not look like a
+    genuinely empty listing. "Found nothing" and "I can no longer read this" are
+    indistinguishable to the caller, and the quiet one is worse: a format change
+    would log "0 in last 7d", count no errors, and ping the healthcheck green
+    while silently processing nothing."""
     out = _run_plaud(["recent", "--days", str(days)])
     ids: list[str] = []
     for raw in out.splitlines():
@@ -219,6 +260,11 @@ def plaud_recent_ids(days: int) -> list[str]:
         if i not in seen:
             seen.add(i)
             uniq.append(i)
+    if not uniq and not PLAUD_EMPTY_LISTING_RE.search(strip_ansi(out)):
+        raise RuntimeError(
+            "plaud recent parsed 0 recordings but the output does not look like an "
+            "empty listing. The CLI output format has probably changed. First 200 "
+            f"chars: {strip_ansi(out).strip()[:200]!r}")
     return uniq
 
 
@@ -339,7 +385,17 @@ def transcribe_and_note(audio_path: Path, base: str, work_dir: Path,
     data = aai_transcribe(audio_url, aai_key)
     transcript = transcript_to_text(data)
     transcript_path.write_text(transcript, encoding="utf-8")
-    log(f"      transcript: {transcript_path.name} ({len(transcript)} chars)")
+    # Duration and word count separate the two reasons a transcript comes back
+    # empty: real audio that nobody spoke over (fine, keep it) versus audio that
+    # never arrived (a real failure). Logged rather than enforced until we have
+    # seen what the silent recordings actually look like.
+    duration = data.get("audio_duration")
+    words = len(data.get("words") or [])
+    log(f"      transcript: {transcript_path.name} ({len(transcript)} chars, "
+        f"{words} words, audio_duration={duration})")
+    if not transcript.strip():
+        log(f"      [note] empty transcript, audio_duration={duration} "
+            f"(silent recording if duration is non-zero)")
 
     log(f"      generating notes ({model}) ...")
     notes = gemini_notes(transcript, gem_key, model)
@@ -393,7 +449,7 @@ def process_plaud(processed: set[str], aai_key: str, gem_key: str, model: str,
             raise
         except Exception as e:
             errors += 1
-            err(f"[plaud] ERROR {file_id}: {e}")  # not marked -> retried next run
+            record_error(f"[plaud] ERROR {file_id}: {e}")  # not marked -> retried next run
     return ok, errors
 
 
@@ -423,7 +479,7 @@ def process_intake(aai_key: str, gem_key: str, model: str,
             log(f"[intake] done {name}")
         except Exception as e:
             errors += 1
-            err(f"[intake] ERROR {name}: {e}")  # not moved -> retried next run
+            record_error(f"[intake] ERROR {name}: {e}")  # not moved -> retried next run
     return ok, errors
 
 
@@ -479,7 +535,7 @@ def main() -> int:
             intake_ok, intake_err = process_intake(aai_key, gem_key, model, args.dry_run)
         except Exception as e:
             intake_err += 1
-            err(f"[intake] FATAL: {e}")
+            record_error(f"[intake] FATAL: {e}")
 
     if args.source in ("all", "plaud"):
         processed = load_processed_ids()
@@ -490,7 +546,7 @@ def main() -> int:
             emit_auth_alert()
         except Exception as e:
             plaud_err += 1
-            err(f"[plaud] FATAL: {e}")
+            record_error(f"[plaud] FATAL: {e}")
 
     total_ok = intake_ok + plaud_ok
     total_err = intake_err + plaud_err
@@ -507,9 +563,15 @@ def main() -> int:
                 "**Fix:** re-run `plaud login` (or re-seed `tokens.json`) on teslamate-vm.\n\n"
                 f"- {summary}\n- {ts}")
         else:
+            # Quote the actual failures. The issue is deduped by title, so a
+            # persistent failure only ever files once, so if that one issue says
+            # nothing but "check journalctl", the run is effectively silent.
+            detail = ("\n".join(f"- `{e}`" for e in RUN_ERRORS)
+                      or "- (no error text captured)")
             notify_github_issue(
                 "[plaud-pipeline] Nightly run reported errors",
                 f"The nightly run finished with {total_err} error(s).\n\n"
+                f"**What failed:**\n{detail}\n\n"
                 "**Check:** `journalctl -u plaud-pipeline.service --since today` on teslamate-vm.\n\n"
                 f"- {summary}\n- {ts}")
 

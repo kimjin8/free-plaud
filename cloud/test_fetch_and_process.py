@@ -223,6 +223,133 @@ class AuthAlertTests(TestHelper):
                          ["[plaud-pipeline] Plaud login expired — re-auth needed"])
 
 
+class AuthClassificationTests(unittest.TestCase):
+    """An expired login must be recognised even when the CLI does not exit 2.
+
+    This is the regression behind issue #2: a non-zero exit carrying an auth
+    message became a generic RuntimeError, so the run filed the vague
+    "reported errors" issue instead of the actionable re-auth one.
+    """
+
+    AUTH_MESSAGES = [
+        "Error: 401 Unauthorized",
+        "token is expired, run plaud login",
+        "Authentication failed",
+        "HTTP 403 forbidden",
+        "You are not logged in",
+        "invalid token",
+    ]
+    OTHER_MESSAGES = [
+        "network unreachable",
+        "request timed out after 120s",
+        "rclone: directory not found",
+        "disk full",
+    ]
+
+    def test_auth_shaped_messages_are_detected(self):
+        for m in self.AUTH_MESSAGES:
+            self.assertTrue(fp.PLAUD_AUTH_TEXT_RE.search(m), m)
+
+    def test_unrelated_failures_are_not_misread_as_auth(self):
+        for m in self.OTHER_MESSAGES:
+            self.assertIsNone(fp.PLAUD_AUTH_TEXT_RE.search(m), m)
+
+
+class RunErrorCaptureTests(unittest.TestCase):
+    """The failure issue is deduped by title, so it must carry the error text."""
+
+    def setUp(self):
+        fp.RUN_ERRORS.clear()
+        self.addCleanup(fp.RUN_ERRORS.clear)
+
+    def test_record_error_collects_and_still_logs(self):
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            fp.record_error("[plaud] FATAL: boom")
+        self.assertIn("boom", buf.getvalue())
+        self.assertEqual(fp.RUN_ERRORS, ["[plaud] FATAL: boom"])
+
+    def test_capture_is_bounded(self):
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            for i in range(25):
+                fp.record_error(f"e{i}")
+        self.assertEqual(len(fp.RUN_ERRORS), 10)
+
+
+import subprocess, unittest
+
+class RunPlaudAuthDispatchTests(TestHelper):
+    """_run_plaud must classify auth-shaped failures, not just own a regex.
+
+    The regex tests above pass even if the check is deleted from _run_plaud, so
+    this drives the real function with a faked subprocess result.
+    """
+
+    def _fake_run(self, returncode, stderr):
+        def run(cmd, **kw):
+            return subprocess.CompletedProcess(cmd, returncode, stdout="", stderr=stderr)
+        return run
+
+    def test_auth_message_on_non_auth_exit_code_raises_auth_error(self):
+        self.patch("subprocess", type("m", (), {
+            "run": staticmethod(self._fake_run(1, "Error: 401 Unauthorized")),
+            "CompletedProcess": subprocess.CompletedProcess,
+        }))
+        with self.assertRaises(fp.PlaudAuthError):
+            fp._run_plaud(["recent", "--days", "7"])
+
+    def test_non_auth_failure_still_raises_runtime_error(self):
+        self.patch("subprocess", type("m", (), {
+            "run": staticmethod(self._fake_run(1, "network unreachable")),
+            "CompletedProcess": subprocess.CompletedProcess,
+        }))
+        with self.assertRaises(RuntimeError):
+            fp._run_plaud(["recent", "--days", "7"])
+
+
+
+class RecentParseGuardTests(TestHelper):
+    """A format change must fail loudly instead of reporting a quiet night.
+
+    Without the guard, unparseable output yields [] and the run logs
+    "0 in last 7d", counts no errors, and pings the healthcheck green.
+    """
+
+    def test_genuinely_empty_listing_is_not_an_error(self):
+        self.patch("_run_plaud", lambda args: RECENT_EMPTY)
+        self.assertEqual(fp.plaud_recent_ids(2), [])
+
+    def test_unparseable_output_raises(self):
+        # Same data, new layout: no indent, so the row filter drops everything.
+        changed = "ID | Name | Date\nrec_alpha000000001 | Standup | 2026-06-23\n"
+        self.patch("_run_plaud", lambda args: changed)
+        with self.assertRaises(RuntimeError) as cm:
+            fp.plaud_recent_ids(2)
+        self.assertIn("format has probably changed", str(cm.exception))
+
+    def test_normal_listing_still_parses(self):
+        self.patch("_run_plaud", lambda args: RECENT_OUTPUT)
+        self.assertEqual(len(fp.plaud_recent_ids(2)), 3)
+
+
+class EmptyTranscriptLoggingTests(TestHelper):
+    """An empty transcript must record why, so silence is distinguishable."""
+
+    def test_empty_transcript_logs_duration(self):
+        self.patch("aai_upload", lambda p, k: "https://example.com/a.mp3")
+        self.patch("aai_transcribe", lambda u, k: {"text": "", "words": [],
+                                                   "audio_duration": 41})
+        self.patch("gemini_notes", lambda t, k, m: "# Untitled\n")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            fp.transcribe_and_note(self._tmp / "a.wav", "base", self._tmp,
+                                   "aai", "gem", "model")
+        out = buf.getvalue()
+        self.assertIn("audio_duration=41", out)
+        self.assertIn("empty transcript", out)
+
+
 class GitHubNotifyTests(TestHelper):
     def test_noop_when_unconfigured(self):
         # No GITHUB_TOKEN/REPO in the test env -> must not touch the network.

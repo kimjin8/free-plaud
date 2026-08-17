@@ -4,12 +4,18 @@
 # the Plaud CLI token and processed-ids state are host volumes (see cloud/host-run.sh).
 FROM python:3.11-slim
 
+# Pinned on purpose. fetch_and_process.py parses the CLI's human-readable table
+# output and its exit codes, so a CLI bump can silently change what we parse. An
+# unpinned install means any image rebuild is also an unplanned CLI upgrade. Bump
+# this deliberately and dry-run against the previous version before shipping.
+ARG PLAUD_CLI_VERSION=0.3.8
+
 # rclone (Drive I/O) + Node 20 (Plaud CLI) + Doppler CLI (direct binary) + requests.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl ca-certificates rclone \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
-    && npm install -g @plaud-ai/cli \
+    && npm install -g "@plaud-ai/cli@${PLAUD_CLI_VERSION}" \
     && curl -sLf "https://api.github.com/repos/DopplerHQ/cli/releases/latest" -o /tmp/rel.json \
     && DOPPLER_URL=$(grep -o '"browser_download_url": *"[^"]*linux_amd64.tar.gz"' /tmp/rel.json | head -1 | cut -d'"' -f4) \
     && curl -sLf "$DOPPLER_URL" -o /tmp/doppler.tgz \
