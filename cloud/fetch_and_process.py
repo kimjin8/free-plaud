@@ -31,6 +31,7 @@ written to the destination Drive folder except transcripts and notes.
 """
 
 import argparse
+import importlib.util
 import os
 import re
 import shutil
@@ -39,6 +40,7 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -64,6 +66,10 @@ PLAUD_LOOKBACK_DAYS = int(os.environ.get("PLAUD_LOOKBACK_DAYS", "2"))
 RCLONE_REMOTE = os.environ.get("RCLONE_REMOTE", "gdrive")
 ARCHIVE_PLAUD_AUDIO = os.environ.get("ARCHIVE_PLAUD_AUDIO", "false").lower() == "true"
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
+
+# Output filenames carry the meeting's local wall-clock time, not UTC, so they match
+# how the meeting is remembered. Matches the timer's America/Los_Angeles schedule.
+OUTPUT_TZ = ZoneInfo(os.environ.get("OUTPUT_TZ", "America/Los_Angeles"))
 
 # Persistent state lives on the host disk (NOT in Drive). Defaults to the same
 # directory as the env file the design specifies.
@@ -299,9 +305,16 @@ def plaud_recording_time(file_id: str) -> str | None:
         val = fields.get(key)
         if val and val != "-":
             try:
-                return datetime.fromisoformat(val).strftime("%Y-%m-%d %H_%M_%S")
+                dt = datetime.fromisoformat(val)
             except ValueError:
                 continue
+            # Plaud reports UTC with no offset (e.g. "2026-08-17T23:33:41"), so the
+            # naive value must be tagged UTC before converting. Without this the
+            # filename said 23_33_41 for a 4:33pm PT meeting. Note the Soundcore Hub
+            # already reports local time, so its names are NOT converted again.
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(OUTPUT_TZ).strftime("%Y-%m-%d %H_%M_%S")
     return None
 
 
@@ -483,6 +496,23 @@ def process_intake(aai_key: str, gem_key: str, model: str,
     return ok, errors
 
 
+def process_soundcore(dry_run: bool) -> tuple[int, int]:
+    """Pull new Soundcore recordings into the intake folder. Returns (ok, errors).
+
+    Imported lazily: it needs Playwright, which is not installed on the nightly VM,
+    and importing it eagerly would break every other source on that host."""
+    # Check for Playwright itself, not for the fetcher module. soundcore_fetch
+    # imports cleanly without it (the browser import is lazy inside open_hub), so
+    # importing the module proves nothing and the failure would surface mid-run.
+    # A browser-less host is a deployment fact, not an error, so it must not file an
+    # issue every night. Logged, never silent.
+    if importlib.util.find_spec("playwright") is None:
+        log("[soundcore] skipped: Playwright is not installed on this host")
+        return 0, 0
+    from soundcore_fetch import fetch_new  # noqa: E402
+    return fetch_new(dry_run)
+
+
 def _download(url: str, dest: Path) -> None:
     with requests.get(url, stream=True, timeout=300) as r:
         r.raise_for_status()
@@ -498,8 +528,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Plaud + Drive intake -> transcribe/notes -> Drive.")
     ap.add_argument("--dry-run", action="store_true",
                     help="List what WOULD be processed; no downloads, no paid API calls.")
-    ap.add_argument("--source", choices=["all", "plaud", "intake"], default="all",
-                    help="Limit to one source (default: all).")
+    ap.add_argument("--source", choices=["all", "plaud", "intake", "soundcore"],
+                    default="all", help="Limit to one source (default: all).")
     args = ap.parse_args()
 
     # Only require the tools the selected sources actually use.
@@ -508,6 +538,8 @@ def main() -> int:
         needed.append("rclone")
     if args.source in ("all", "plaud"):
         needed.append("plaud")
+    if args.source == "soundcore":
+        needed = []  # browser-driven, no CLI tools
     for tool in needed:
         if shutil.which(tool) is None:
             err(f"ERROR: required tool not found on PATH: {tool}")
@@ -527,9 +559,20 @@ def main() -> int:
         f"archive_plaud_audio: {ARCHIVE_PLAUD_AUDIO} | dry_run: {args.dry_run}")
 
     intake_ok = intake_err = plaud_ok = plaud_err = 0
+    sc_ok = sc_err = 0
     auth_failed = False
 
-    # Intake first so a Plaud auth failure never discards intake results.
+    # Soundcore first: it drops .ogg files into the intake folder, and running it
+    # ahead of process_intake is what makes one invocation fetch AND transcribe them
+    # instead of leaving them for the next night.
+    if args.source in ("all", "soundcore"):
+        try:
+            sc_ok, sc_err = process_soundcore(args.dry_run)
+        except Exception as e:
+            sc_err += 1
+            record_error(f"[soundcore] FATAL: {e}")
+
+    # Intake next so a Plaud auth failure never discards intake results.
     if args.source in ("all", "intake"):
         try:
             intake_ok, intake_err = process_intake(aai_key, gem_key, model, args.dry_run)
@@ -549,8 +592,9 @@ def main() -> int:
             record_error(f"[plaud] FATAL: {e}")
 
     total_ok = intake_ok + plaud_ok
-    total_err = intake_err + plaud_err
-    summary = f"processed={total_ok} intake={intake_ok} plaud={plaud_ok} errors={total_err}"
+    total_err = intake_err + plaud_err + sc_err
+    summary = (f"processed={total_ok} intake={intake_ok} plaud={plaud_ok} "
+               f"soundcore_fetched={sc_ok} errors={total_err}")
     log(summary)
 
     # Notify on failure (GitHub issue). Dry-runs never notify.

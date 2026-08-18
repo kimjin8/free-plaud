@@ -24,9 +24,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* /tmp/doppler.tgz /tmp/rel.json \
     && doppler --version && rclone --version | head -1
 
+# Playwright + Chromium for the Soundcore stage. Note `playwright install --with-deps`
+# is deliberately NOT used: it pulls optional font packages that do not exist on this
+# Debian release and fails the build over fonts Chromium never needs. The runtime
+# libraries are listed explicitly instead.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
+        libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
+        libgbm1 libasound2 libpango-1.0-0 libcairo2 libatspi2.0-0 \
+    && pip install --no-cache-dir playwright==1.51.0 \
+    && playwright install chromium \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 COPY plaud_pipeline.py /app/plaud_pipeline.py
 COPY cloud/fetch_and_process.py /app/cloud/fetch_and_process.py
+COPY cloud/soundcore_fetch.py /app/cloud/soundcore_fetch.py
 
 # Doppler (config prd) injects ASSEMBLYAI_API_KEY / GEMINI_API_KEY / GEMINI_MODEL.
 # Drive (rclone) + Plaud tokens come from mounted host volumes, not Doppler.

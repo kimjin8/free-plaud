@@ -155,8 +155,11 @@ def _gemini_request(method: str, path: str, api_key: str, json_body=None):
         last = r
         if r.status_code not in (401, 403):
             break
-    raise RuntimeError(f"Gemini API {r.status_code if last else '?'}: "
-                       f"{(last.text if last else '')[:400]}")
+    # `if last` would be False here: requests.Response.__bool__ returns .ok, so a
+    # failed response is falsy and this threw away the status and body on exactly
+    # the path that needs them. Compare to None.
+    raise RuntimeError(f"Gemini API {last.status_code if last is not None else '?'}: "
+                       f"{(last.text if last is not None else '')[:400]}")
 
 
 def resolve_model(requested: str, api_key: str) -> str:

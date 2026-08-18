@@ -13,10 +13,11 @@ Why a browser instead of an HTTP client:
   So we drive the real app and let its own JS do the crypto, then harvest the file
   the Hub's own "Export Audio" action produces.
 
-Why this is a separate process from the nightly job:
-  The nightly job runs in a container on a 1 GB e2-micro shared with TeslaMate. A
-  headless Chromium does not fit there. This runs on a host with RAM (the Mac mini)
-  and only talks to Drive, so the two stay decoupled.
+Where this runs:
+  On the same 1 GB host as the nightly job, as one program. Measured: headless
+  Chromium peaks around 250 MB there with a real session, so the container is capped
+  (see cloud/host-run.sh). If the browser ever overruns, Docker kills this container
+  and the co-tenant services are untouched.
 
 Login is manual and one-time (`--login`), exactly like the rclone OAuth ritual in
 cloud/DEPLOY.md. This script never sees or stores an Anker password.
@@ -32,8 +33,8 @@ import argparse
 import json
 import os
 import re
-import shutil
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,6 +43,9 @@ from pathlib import Path
 # second copy. This file lives beside it in cloud/.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from fetch_and_process import (  # noqa: E402
+    INTAKE_FOLDER_ID,
+    RCLONE_REMOTE,
+    _run_rclone,
     err,
     log,
     notify_github_issue,
@@ -63,9 +67,6 @@ PROFILE_DIR = Path(os.environ.get(
 # so an edited recording (version moves) is re-pulled instead of being missed.
 STATE_DIR = Path(os.environ.get("STATE_DIR", str(Path.home() / ".plaud_pipeline"))).expanduser()
 SOUNDCORE_STATE_FILE = STATE_DIR / "soundcore_seen.json"
-
-# Drive path of the intake folder the nightly job watches, relative to "My Drive".
-INTAKE_SUBPATH = Path("2026 LLC") / "Plaud" / "audio"
 
 SOUNDCORE_FORMAT = os.environ.get("SOUNDCORE_FORMAT", "ogg").lower()
 
@@ -285,35 +286,72 @@ def export_note(page, note: dict, dest_dir: Path) -> Path:
 
 # ------------------------------------------------------------------- drive
 
-def resolve_intake_dir() -> Path:
-    """Locate the mounted Drive intake folder ("Plaud/audio").
-
-    This host runs Google Drive for Desktop, so the intake folder is already a real
-    directory. Writing to it needs no second OAuth and no rclone, unlike the VM which
-    reaches Drive over the network. Globbed rather than hardcoded so no absolute
-    home path ends up in the repo."""
-    override = os.environ.get("SOUNDCORE_INTAKE_DIR", "").strip()
-    if override:
-        return Path(override).expanduser()
-    roots = sorted((Path.home() / "Library" / "CloudStorage").glob("GoogleDrive-*"))
-    for root in roots:
-        candidate = root / "My Drive" / INTAKE_SUBPATH
-        if candidate.is_dir():
-            return candidate
-    raise RuntimeError(
-        "could not find the mounted Drive intake folder. Set SOUNDCORE_INTAKE_DIR "
-        f"to the full path of '{INTAKE_SUBPATH}'.")
-
-
 def upload_to_intake(local_file: Path) -> None:
     """Drop the audio into the intake folder the nightly job already watches.
 
-    Written to a temp name first and renamed into place, so the nightly job can
-    never pick up a half-copied file and transcribe silence."""
-    intake = resolve_intake_dir()
-    staging = intake / f".{local_file.name}.part"
-    shutil.copyfile(local_file, staging)
-    staging.rename(intake / local_file.name)
+    Uses the same rclone adapter as the rest of the pipeline. rclone finalises a
+    Drive upload only when it completes, so a partial file is never visible to
+    process_intake()."""
+    _run_rclone([
+        "copy", str(local_file), f"{RCLONE_REMOTE}:",
+        "--drive-root-folder-id", INTAKE_FOLDER_ID,
+    ])
+
+
+# ------------------------------------------------------------------------- fetch
+
+def fetch_new(dry_run: bool) -> tuple[int, int]:
+    """Export every new Hub recording into the Drive intake folder.
+
+    Returns (exported, errors). Session expiry is handled here rather than raised,
+    so it files its own named issue whether this runs standalone or as a stage of
+    the nightly program, and so one dead session is one counted error instead of an
+    exception that aborts the other sources."""
+    seen = load_seen()
+    ok = errors = 0
+    pw = ctx = None
+    try:
+        pw, ctx, page = open_hub(headless=True)
+        assert_signed_in(page)
+        notes = list_notes(page)
+        new = [n for n in notes if is_new(n, seen)]
+        log(f"[soundcore] {len(notes)} recording(s), {len(new)} new")
+
+        for note in new:
+            label = note.get("title") or note["id"]
+            if dry_run:
+                log(f"[soundcore] WOULD export: {label}")
+                continue
+            log(f"[soundcore] exporting {label}")
+            try:
+                with tempfile.TemporaryDirectory(prefix="soundcore_") as td:
+                    audio = export_note(page, note, Path(td))
+                    upload_to_intake(audio)
+                # Only after the file is safely in intake, so a failure retries.
+                seen[str(note["id"])] = str(note.get("version", ""))
+                save_seen(seen)
+                ok += 1
+                log(f"[soundcore] done {label}")
+            except Exception as e:
+                errors += 1
+                err(f"[soundcore] ERROR {label}: {e}")
+
+    except SoundcoreAuthError as e:
+        errors += 1
+        err(f"[ALERT][SOUNDCORE_AUTH_FAILED] {e}")
+        if not dry_run:
+            notify_github_issue(
+                "[soundcore-fetch] Hub session expired, re-login needed",
+                "The Soundcore fetcher could not reach the Hub with the saved session.\n\n"
+                "**Fix:** re-run `python3 cloud/soundcore_fetch.py --login` on the host "
+                "and sign in again.\n\n"
+                f"- {e}\n- {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+    finally:
+        if ctx:
+            ctx.close()
+        if pw:
+            pw.stop()
+    return ok, errors
 
 
 # ------------------------------------------------------------------------- main
@@ -368,51 +406,7 @@ def main() -> int:
             ctx.close()
             pw.stop()
 
-    seen = load_seen()
-    errors = 0
-    pw = ctx = None
-    try:
-        pw, ctx, page = open_hub(headless=True)
-        assert_signed_in(page)
-        notes = list_notes(page)
-        new = [n for n in notes if is_new(n, seen)]
-        log(f"[soundcore] {len(notes)} recording(s), {len(new)} new")
-
-        for note in new:
-            label = note.get("title") or note["id"]
-            if args.dry_run:
-                log(f"[soundcore] WOULD export: {label}")
-                continue
-            log(f"[soundcore] exporting {label}")
-            try:
-                import tempfile
-                with tempfile.TemporaryDirectory(prefix="soundcore_") as td:
-                    audio = export_note(page, note, Path(td))
-                    upload_to_intake(audio)
-                # Only after the file is safely in Drive, so a failure retries.
-                seen[str(note["id"])] = str(note.get("version", ""))
-                save_seen(seen)
-                log(f"[soundcore] done {label}")
-            except Exception as e:
-                errors += 1
-                err(f"[soundcore] ERROR {label}: {e}")
-
-    except SoundcoreAuthError as e:
-        err(f"[ALERT][SOUNDCORE_AUTH_FAILED] {e}")
-        if not args.dry_run:
-            notify_github_issue(
-                "[soundcore-fetch] Hub session expired — re-login needed",
-                "The Soundcore fetcher could not reach the Hub with the saved session.\n\n"
-                "**Fix:** re-run `python3 cloud/soundcore_fetch.py --login` on the host "
-                "and sign in again.\n\n"
-                f"- {e}\n- {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
-        return 2
-    finally:
-        if ctx:
-            ctx.close()
-        if pw:
-            pw.stop()
-
+    ok, errors = fetch_new(args.dry_run)
     return 1 if errors else 0
 
 

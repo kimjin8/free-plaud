@@ -104,12 +104,13 @@ class ParsingTests(TestHelper):
                "  created_at:   2026-07-01T20:34:35\n"
                "  start_at:     2026-07-01T20:00:23.563000\n  duration:     33m10s\n")
         self.patch("_run_plaud", lambda args: out)
-        self.assertEqual(fp.plaud_recording_time("abc"), "2026-07-01 20_00_23")
+        # start_at wins over created_at, and the UTC value is rendered in local time.
+        self.assertEqual(fp.plaud_recording_time("abc"), "2026-07-01 13_00_23")
 
     def test_recording_time_falls_back_to_created_at(self):
         out = ("  created_at:   2026-07-01T20:34:35\n  start_at:     -\n")
         self.patch("_run_plaud", lambda args: out)
-        self.assertEqual(fp.plaud_recording_time("abc"), "2026-07-01 20_34_35")
+        self.assertEqual(fp.plaud_recording_time("abc"), "2026-07-01 13_34_35")
 
     def test_intake_filters_to_audio_only(self):
         listing = "Standup.m4a\nNotes.txt\ncall.mp3\nimage.png\narchive.zip\nvoice.opus\n"
@@ -348,6 +349,93 @@ class EmptyTranscriptLoggingTests(TestHelper):
         out = buf.getvalue()
         self.assertIn("audio_duration=41", out)
         self.assertIn("empty transcript", out)
+
+
+
+class GeminiErrorReportingTests(unittest.TestCase):
+    """A failed Gemini call must name the status and body.
+
+    requests.Response.__bool__ is .ok, so a 4xx/5xx response is falsy. Guarding with
+    `if last` silently produced "Gemini API ?: " with no detail, which is what turned
+    a real failure into an unactionable GitHub issue.
+    """
+
+    class _Resp:
+        def __init__(self, code, text):
+            self.status_code, self.text = code, text
+        def __bool__(self):            # mirrors requests.Response
+            return self.status_code < 400
+        def json(self):
+            return {}
+
+    def _patch_request(self, resp):
+        import plaud_pipeline as pp
+        old = pp.requests.request
+        pp.requests.request = lambda *a, **k: resp
+        self.addCleanup(lambda: setattr(pp.requests, "request", old))
+        return pp
+
+    def test_failure_reports_status_and_body(self):
+        pp = self._patch_request(self._Resp(429, "RESOURCE_EXHAUSTED: quota"))
+        with self.assertRaises(RuntimeError) as cm:
+            pp._gemini_request("POST", "models/x:generateContent", "k", {})
+        msg = str(cm.exception)
+        self.assertIn("429", msg)
+        self.assertIn("RESOURCE_EXHAUSTED", msg)
+        self.assertNotIn("?", msg)
+
+    def test_success_returns_json(self):
+        pp = self._patch_request(self._Resp(200, "ok"))
+        self.assertEqual(pp._gemini_request("POST", "p", "k", {}), {})
+
+
+
+class SoundcoreStageTests(TestHelper):
+    """The soundcore stage must never turn a browser-less host into a nightly alert."""
+
+    def test_missing_playwright_is_a_skip_not_an_error(self):
+        # The VM has no Playwright. Note this must be detected by probing for the
+        # package: importing soundcore_fetch succeeds without it, because its browser
+        # import is lazy, so an import check would pass and then fail mid-run.
+        self.patch("importlib", __import__("types").SimpleNamespace(
+            util=__import__("types").SimpleNamespace(find_spec=lambda n: None)))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            ok, errors = fp.process_soundcore(dry_run=True)
+        self.assertEqual((ok, errors), (0, 0))
+        self.assertIn("skipped", buf.getvalue())
+
+
+
+class RecordingTimeZoneTests(TestHelper):
+    """Filenames must carry local wall-clock time, not UTC.
+
+    The regression: a 4:33pm PT meeting was written as "2026-08-17 23_33_41", so it
+    looked like a different meeting on a different evening.
+    """
+
+    def _time_for(self, raw):
+        self.patch("_run_plaud", lambda args: f"  start_at:  {raw}\n")
+        return fp.plaud_recording_time("rec_x")
+
+    def test_naive_utc_is_converted_to_pacific(self):
+        # The real value that produced the bug.
+        self.assertEqual(self._time_for("2026-08-17T23:33:41"), "2026-08-17 16_33_41")
+
+    def test_offset_aware_value_is_converted_too(self):
+        self.assertEqual(self._time_for("2026-08-17T23:33:41+00:00"),
+                         "2026-08-17 16_33_41")
+
+    def test_standard_time_uses_the_other_offset(self):
+        # January is PST (UTC-8), not PDT (UTC-7). A fixed offset would be wrong here.
+        self.assertEqual(self._time_for("2026-01-15T23:33:41"), "2026-01-15 15_33_41")
+
+    def test_conversion_can_roll_back_a_day(self):
+        # 00:30 UTC is the previous evening in Pacific. The date must move too.
+        self.assertEqual(self._time_for("2026-08-18T00:30:00"), "2026-08-17 17_30_00")
+
+    def test_unparseable_falls_back_to_none(self):
+        self.assertIsNone(self._time_for("not-a-timestamp"))
 
 
 class GitHubNotifyTests(TestHelper):

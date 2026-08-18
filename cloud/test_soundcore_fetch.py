@@ -19,11 +19,9 @@ Run:
 
 import importlib.util
 import json
-import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest import mock
 
 _SPEC = importlib.util.spec_from_file_location(
     "soundcore_fetch", str(Path(__file__).resolve().parent / "soundcore_fetch.py"))
@@ -106,38 +104,22 @@ class SessionExpiryTests(TestHelper):
 
 
 class IntakeWriteTests(TestHelper):
-    """The nightly job scans this folder, so a partial file would be transcribed."""
+    """The fetcher must hand off through the same Drive adapter as the nightly job."""
 
-    def test_override_env_wins(self):
-        with mock.patch.dict(os.environ, {"SOUNDCORE_INTAKE_DIR": str(self._tmp)}):
-            self.assertEqual(sc.resolve_intake_dir(), self._tmp)
-
-    def test_upload_lands_the_file_with_its_name_and_bytes(self):
-        src = self._tmp / "2026-08-17 08_49_15.ogg"
-        src.write_bytes(b"OggS-fake-audio")
-        dest_dir = self._tmp / "intake"
-        dest_dir.mkdir()
-        with mock.patch.dict(os.environ, {"SOUNDCORE_INTAKE_DIR": str(dest_dir)}):
-            sc.upload_to_intake(src)
-        landed = dest_dir / "2026-08-17 08_49_15.ogg"
-        self.assertEqual(landed.read_bytes(), b"OggS-fake-audio")
-
-    def test_no_partial_file_is_left_behind(self):
-        # The staging name must not survive, or the intake scan could pick it up.
-        src = self._tmp / "a.ogg"
-        src.write_bytes(b"x")
-        dest_dir = self._tmp / "intake2"
-        dest_dir.mkdir()
-        with mock.patch.dict(os.environ, {"SOUNDCORE_INTAKE_DIR": str(dest_dir)}):
-            sc.upload_to_intake(src)
-        self.assertEqual([p.name for p in dest_dir.iterdir()], ["a.ogg"])
-
-    def test_unresolvable_intake_dir_raises(self):
-        with mock.patch.dict(os.environ, {"SOUNDCORE_INTAKE_DIR": ""}):
-            self.patch("INTAKE_SUBPATH", Path("definitely") / "not" / "a" / "folder")
-            with mock.patch.object(Path, "home", return_value=self._tmp):
-                with self.assertRaises(RuntimeError):
-                    sc.resolve_intake_dir()
+    def test_upload_targets_the_intake_folder(self):
+        calls = []
+        self.patch("_run_rclone", lambda args: calls.append(args) or "")
+        sc.upload_to_intake(Path("/tmp/2026-08-17 08_49_15.ogg"))
+        self.assertEqual(len(calls), 1)
+        args = calls[0]
+        self.assertEqual(args[0], "copy")
+        self.assertIn("2026-08-17 08_49_15.ogg", args[1])
+        # Must land in the INTAKE folder. Writing to the destination folder instead
+        # would publish raw audio into Meeting Log and skip transcription entirely.
+        self.assertIn("--drive-root-folder-id", args)
+        self.assertEqual(args[args.index("--drive-root-folder-id") + 1],
+                         sc.INTAKE_FOLDER_ID)
+        self.assertNotEqual(sc.INTAKE_FOLDER_ID, "")
 
 
 if __name__ == "__main__":
